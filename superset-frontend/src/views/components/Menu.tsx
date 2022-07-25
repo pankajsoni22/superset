@@ -17,7 +17,7 @@
  * under the License.
  */
 import React, { useState, useEffect } from 'react';
-import { styled, css, useTheme, SupersetTheme } from '@superset-ui/core';
+import { styled, css, useTheme, SupersetTheme, t } from '@superset-ui/core';
 import { debounce } from 'lodash';
 import { Global } from '@emotion/react';
 import { getUrlParam } from 'src/utils/urlUtils';
@@ -30,6 +30,9 @@ import { useUiConfig } from 'src/components/UiConfigContext';
 import { URL_PARAMS } from 'src/constants';
 import RightMenu from './RightMenu';
 import { Languages } from './LanguagePicker';
+import { useListViewResource } from '../CRUD/hooks';
+import Dashboard from 'src/types/Dashboard';
+import { addDangerToast } from 'src/components/MessageToasts/actions';
 
 interface BrandProps {
   path: string;
@@ -222,6 +225,53 @@ export function Menu({
   const standalone = getUrlParam(URL_PARAMS.standalone);
   if (standalone || uiConfig.hideNav) return <></>;
 
+
+
+  let dashboardListObj=JSON.parse(window.sessionStorage.getItem('dashboard_list'))
+  let dashboards=[]
+  let nav_item={}
+  let menuData=[...menu]
+  
+  if (dashboardListObj){
+  //   const {
+  //     state: {
+  //       loading,
+  //       resourceCount: dashboardCount,
+  //       resourceCollection: dashboards_,
+  //       bulkSelectEnabled,
+  //     },
+  //     setResourceCollection: setDashboards,
+  //     hasPerm,
+  //     fetchData,
+  //     toggleBulkSelect,
+  //     refreshData,
+  //   } = useListViewResource<Dashboard>(
+  //     'dashboard',
+  //     t('dashboard'),
+  //     addDangerToast,
+  //   );
+  //   window.sessionStorage.setItem("dashboard_list", JSON.stringify(dashboards_))
+  //   // dashboards=dashboards_
+  //   nav_item={label: 'Navigate', childs: dashboards_}
+  //   menuData=[...menuData, nav_item]
+  //   debugger;
+  // }else{
+    dashboards=Object.keys(dashboardListObj).map(key=>{
+      const {dashboard_title: title, url}=dashboardListObj[key];
+      return {name: title, url, label: title, icon: 'fa-flask', isFrontendRoute: true}
+    })
+    // console.log(`dashboards ${dashboards}`)
+    nav_item={label: 'Navigate', childs: dashboards}
+    menuData=[...menuData, nav_item]
+    debugger;
+  }
+  
+  
+
+
+  
+  
+
   const renderSubMenu = ({
     label,
     childs,
@@ -296,7 +346,7 @@ export function Menu({
             data-test="navbar-top"
             className="main-nav"
           >
-            {menu.map((item, index) => {
+            {menuData.map((item, index) => {
               const props = {
                 index,
                 ...item,

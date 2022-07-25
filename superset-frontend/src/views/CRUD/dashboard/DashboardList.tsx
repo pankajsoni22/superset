@@ -133,6 +133,11 @@ function DashboardList(props: DashboardListProps) {
   const [passwordFields, setPasswordFields] = useState<string[]>([]);
   const [preparingExport, setPreparingExport] = useState<boolean>(false);
 
+  (()=>{
+    window.sessionStorage.setItem("dashboard_list", JSON.stringify(dashboards))
+    debugger;
+  })()
+
   const openDashboardImportModal = () => {
     showImportModal(true);
   };
