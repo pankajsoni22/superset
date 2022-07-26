@@ -182,7 +182,6 @@ export function useListViewResource<D extends object = any>(
     },
     [baseFilters],
   );
-
   return {
     state: {
       loading: state.loading,

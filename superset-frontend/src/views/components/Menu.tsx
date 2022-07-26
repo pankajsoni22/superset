@@ -17,7 +17,7 @@
  * under the License.
  */
 import React, { useState, useEffect } from 'react';
-import { styled, css, useTheme, SupersetTheme, t } from '@superset-ui/core';
+import { styled, css, useTheme, SupersetTheme, t, SupersetClient } from '@superset-ui/core';
 import { debounce } from 'lodash';
 import { Global } from '@emotion/react';
 import { getUrlParam } from 'src/utils/urlUtils';
@@ -33,6 +33,7 @@ import { Languages } from './LanguagePicker';
 import { useListViewResource } from '../CRUD/hooks';
 import Dashboard from 'src/types/Dashboard';
 import { addDangerToast } from 'src/components/MessageToasts/actions';
+import { createErrorHandler } from '../CRUD/utils';
 
 interface BrandProps {
   path: string;
@@ -206,6 +207,7 @@ export function Menu({
   isFrontendRoute = () => false,
 }: MenuProps) {
   const [showMenu, setMenu] = useState<MenuMode>('horizontal');
+  const [menuData, setMenuData] = useState([...menu])
   const screens = useBreakpoint();
   const uiConfig = useUiConfig();
   const theme = useTheme();
@@ -225,52 +227,39 @@ export function Menu({
   const standalone = getUrlParam(URL_PARAMS.standalone);
   if (standalone || uiConfig.hideNav) return <></>;
 
+  useEffect(() => {
+    // fetch latest dashboard list
+    SupersetClient.get({
+      endpoint: `/api/v1/dashboard/?q=(page_size:100)`
+    }).then(
+      ({ json = {} })=>{
+        const dashboardListObj = json?.result;
+        if (dashboardListObj){
+          const dashboards=Object.keys(dashboardListObj).map(key=>{
+            const {dashboard_title: title, url}=dashboardListObj[key];
+            return {name: title, url, label: title, icon: 'fa-flask', isFrontendRoute: true}
+          })
+          
+          if (dashboards) {
+            const nav_item = {label: 'Navigate', childs: dashboards}
 
-
-  let dashboardListObj=JSON.parse(window.sessionStorage.getItem('dashboard_list'))
-  let dashboards=[]
-  let nav_item={}
-  let menuData=[...menu]
-  
-  if (dashboardListObj){
-  //   const {
-  //     state: {
-  //       loading,
-  //       resourceCount: dashboardCount,
-  //       resourceCollection: dashboards_,
-  //       bulkSelectEnabled,
-  //     },
-  //     setResourceCollection: setDashboards,
-  //     hasPerm,
-  //     fetchData,
-  //     toggleBulkSelect,
-  //     refreshData,
-  //   } = useListViewResource<Dashboard>(
-  //     'dashboard',
-  //     t('dashboard'),
-  //     addDangerToast,
-  //   );
-  //   window.sessionStorage.setItem("dashboard_list", JSON.stringify(dashboards_))
-  //   // dashboards=dashboards_
-  //   nav_item={label: 'Navigate', childs: dashboards_}
-  //   menuData=[...menuData, nav_item]
-  //   debugger;
-  // }else{
-    dashboards=Object.keys(dashboardListObj).map(key=>{
-      const {dashboard_title: title, url}=dashboardListObj[key];
-      return {name: title, url, label: title, icon: 'fa-flask', isFrontendRoute: true}
-    })
-    // console.log(`dashboards ${dashboards}`)
-    nav_item={label: 'Navigate', childs: dashboards}
-    menuData=[...menuData, nav_item]
-    debugger;
-  }
-  
-  
-
-
-  
-  
+            if (menuData.length!==0 && menuData[menuData.length-1].label==='Navigate'){
+              menuData.pop()
+            }
+            setMenuData([...menuData, nav_item])
+          }
+          
+        }
+      },
+      createErrorHandler(errMsg =>
+          t(
+            'An error occurred while fetching %ss: %s',
+            t('dashboard'),
+            errMsg,
+          )
+      ),
+    )
+  }, [])
 
   const renderSubMenu = ({
     label,
