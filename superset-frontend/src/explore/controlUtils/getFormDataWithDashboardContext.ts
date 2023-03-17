@@ -18,28 +18,55 @@
  */
 import isEqual from 'lodash/isEqual';
 import {
-  EXTRA_FORM_DATA_OVERRIDE_REGULAR_MAPPINGS,
-  EXTRA_FORM_DATA_OVERRIDE_EXTRA_KEYS,
-  isDefined,
-  JsonObject,
+  AdhocFilter,
   ensureIsArray,
+  EXTRA_FORM_DATA_OVERRIDE_EXTRA_KEYS,
+  EXTRA_FORM_DATA_OVERRIDE_REGULAR_MAPPINGS,
+  isAdhocColumn,
+  isDefined,
+  isFreeFormAdhocFilter,
+  isSimpleAdhocFilter,
+  JsonObject,
+  NO_TIME_RANGE,
+  QueryFormData,
   QueryObjectFilterClause,
   SimpleAdhocFilter,
-  QueryFormData,
 } from '@superset-ui/core';
-import { NO_TIME_RANGE } from '../constants';
+import { OPERATOR_ENUM_TO_OPERATOR_TYPE } from '../constants';
+import { translateToSql } from '../components/controls/FilterControl/utils/translateToSQL';
+import {
+  CLAUSES,
+  EXPRESSION_TYPES,
+} from '../components/controls/FilterControl/types';
 
 const simpleFilterToAdhoc = (
   filterClause: QueryObjectFilterClause,
-  clause = 'where',
+  clause: CLAUSES = CLAUSES.WHERE,
 ) => {
-  const result = {
-    clause: clause.toUpperCase(),
-    expressionType: 'SIMPLE',
-    operator: filterClause.op,
-    subject: filterClause.col,
-    comparator: 'val' in filterClause ? filterClause.val : undefined,
-  } as SimpleAdhocFilter;
+  let result: AdhocFilter;
+  if (isAdhocColumn(filterClause.col)) {
+    result = {
+      expressionType: 'SQL',
+      clause,
+      sqlExpression: translateToSql({
+        expressionType: EXPRESSION_TYPES.SIMPLE,
+        subject: `(${filterClause.col.sqlExpression})`,
+        operator: filterClause.op,
+        comparator: 'val' in filterClause ? filterClause.val : undefined,
+      } as SimpleAdhocFilter),
+    };
+  } else {
+    result = {
+      expressionType: 'SIMPLE',
+      clause,
+      operator: filterClause.op,
+      operatorId: Object.entries(OPERATOR_ENUM_TO_OPERATOR_TYPE).find(
+        operatorEntry => operatorEntry[1].operation === filterClause.op,
+      )?.[0],
+      subject: filterClause.col,
+      comparator: 'val' in filterClause ? filterClause.val : undefined,
+    } as SimpleAdhocFilter;
+  }
   if (filterClause.isExtra) {
     Object.assign(result, {
       isExtra: true,
@@ -51,20 +78,26 @@ const simpleFilterToAdhoc = (
   return result;
 };
 
-const removeAdhocFilterDuplicates = (filters: SimpleAdhocFilter[]) => {
+const removeAdhocFilterDuplicates = (filters: AdhocFilter[]) => {
   const isDuplicate = (
-    adhocFilter: SimpleAdhocFilter,
-    existingFilters: SimpleAdhocFilter[],
+    adhocFilter: AdhocFilter,
+    existingFilters: AdhocFilter[],
   ) =>
     existingFilters.some(
-      (existingFilter: SimpleAdhocFilter) =>
-        existingFilter.operator === adhocFilter.operator &&
-        existingFilter.subject === adhocFilter.subject &&
-        ((!('comparator' in existingFilter) &&
-          !('comparator' in adhocFilter)) ||
-          ('comparator' in existingFilter &&
-            'comparator' in adhocFilter &&
-            isEqual(existingFilter.comparator, adhocFilter.comparator))),
+      (existingFilter: AdhocFilter) =>
+        (isFreeFormAdhocFilter(existingFilter) &&
+          isFreeFormAdhocFilter(adhocFilter) &&
+          existingFilter.clause === adhocFilter.clause &&
+          existingFilter.sqlExpression === adhocFilter.sqlExpression) ||
+        (isSimpleAdhocFilter(existingFilter) &&
+          isSimpleAdhocFilter(adhocFilter) &&
+          existingFilter.operator === adhocFilter.operator &&
+          existingFilter.subject === adhocFilter.subject &&
+          ((!('comparator' in existingFilter) &&
+            !('comparator' in adhocFilter)) ||
+            ('comparator' in existingFilter &&
+              'comparator' in adhocFilter &&
+              isEqual(existingFilter.comparator, adhocFilter.comparator)))),
     );
 
   return filters.reduce((acc, filter) => {
@@ -72,7 +105,7 @@ const removeAdhocFilterDuplicates = (filters: SimpleAdhocFilter[]) => {
       acc.push(filter);
     }
     return acc;
-  }, [] as SimpleAdhocFilter[]);
+  }, [] as AdhocFilter[]);
 };
 
 const mergeFilterBoxToFormData = (
@@ -164,6 +197,26 @@ const mergeNativeFiltersToFormData = (
   return nativeFiltersData;
 };
 
+const applyTimeRangeFilters = (
+  dashboardFormData: JsonObject,
+  adhocFilters: AdhocFilter[],
+) => {
+  const extraFormData = dashboardFormData.extra_form_data || {};
+  if ('time_range' in extraFormData) {
+    return adhocFilters.map((filter: SimpleAdhocFilter) => {
+      if (filter.operator === 'TEMPORAL_RANGE') {
+        return {
+          ...filter,
+          comparator: extraFormData.time_range,
+          isExtra: true,
+        };
+      }
+      return filter;
+    });
+  }
+  return adhocFilters;
+};
+
 export const getFormDataWithDashboardContext = (
   exploreFormData: QueryFormData,
   dashboardContextFormData: JsonObject,
@@ -176,16 +229,32 @@ export const getFormDataWithDashboardContext = (
     exploreFormData,
     dashboardContextFormData,
   );
-  const adhocFilters = removeAdhocFilterDuplicates([
-    ...ensureIsArray(exploreFormData.adhoc_filters),
-    ...ensureIsArray(filterBoxData.adhoc_filters),
-    ...ensureIsArray(nativeFiltersData.adhoc_filters),
-  ]);
+  const adhocFilters = [
+    ...Object.keys(exploreFormData),
+    ...Object.keys(filterBoxData),
+    ...Object.keys(nativeFiltersData),
+  ]
+    .filter(key => key.match(/adhoc_filter.*/))
+    .reduce(
+      (acc, key) => ({
+        ...acc,
+        [key]: applyTimeRangeFilters(
+          dashboardContextFormData,
+          removeAdhocFilterDuplicates([
+            ...ensureIsArray(exploreFormData[key]),
+            ...ensureIsArray(filterBoxData[key]),
+            ...ensureIsArray(nativeFiltersData[key]),
+          ]),
+        ),
+      }),
+      {},
+    );
+
   return {
     ...exploreFormData,
     ...dashboardContextFormData,
     ...filterBoxData,
     ...nativeFiltersData,
-    adhoc_filters: adhocFilters,
+    ...adhocFilters,
   };
 };

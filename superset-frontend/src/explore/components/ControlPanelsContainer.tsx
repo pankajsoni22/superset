@@ -35,6 +35,11 @@ import {
   DatasourceType,
   css,
   SupersetTheme,
+  useTheme,
+  isDefined,
+  JsonValue,
+  NO_TIME_RANGE,
+  usePrevious,
 } from '@superset-ui/core';
 import {
   ControlPanelSectionConfig,
@@ -42,26 +47,32 @@ import {
   CustomControlItem,
   Dataset,
   ExpandedControlItem,
-  InfoTooltipWithTrigger,
+  isTemporalColumn,
   sections,
 } from '@superset-ui/chart-controls';
+import { useSelector } from 'react-redux';
+import { rgba } from 'emotion-rgba';
+import { kebabCase } from 'lodash';
 
 import Collapse from 'src/components/Collapse';
 import Tabs from 'src/components/Tabs';
 import { PluginContext } from 'src/components/DynamicPlugins';
 import Loading from 'src/components/Loading';
+import Modal from 'src/components/Modal';
 
-import { usePrevious } from 'src/hooks/usePrevious';
 import { getSectionsToRender } from 'src/explore/controlUtils';
 import { ExploreActions } from 'src/explore/actions/exploreActions';
 import { ChartState, ExplorePageState } from 'src/explore/types';
 import { Tooltip } from 'src/components/Tooltip';
-
-import { rgba } from 'emotion-rgba';
+import Icons from 'src/components/Icons';
 import ControlRow from './ControlRow';
 import Control from './Control';
 import { ExploreAlert } from './ExploreAlert';
 import { RunQueryButton } from './RunQueryButton';
+import { Operators } from '../constants';
+import { CLAUSES } from './controls/FilterControl/types';
+
+const { confirm } = Modal;
 
 export type ControlPanelsContainerProps = {
   exploreState: ExplorePageState['explore'];
@@ -84,6 +95,16 @@ export type ExpandedControlPanelSectionConfig = Omit<
 > & {
   controlSetRows: ExpandedControlItem[][];
 };
+
+const iconStyles = css`
+  &.anticon {
+    font-size: unset;
+    .anticon {
+      line-height: unset;
+      vertical-align: unset;
+    }
+  }
+`;
 
 const actionButtonsContainerStyles = (theme: SupersetTheme) => css`
   display: flex;
@@ -215,7 +236,7 @@ function getState(
       )
     ) {
       querySections.push(section);
-    } else {
+    } else if (section.controlSetRows.length > 0) {
       customizeSections.push(section);
     }
   });
@@ -235,19 +256,137 @@ function getState(
   };
 }
 
+function useResetOnChangeRef(initialValue: () => any, resetOnChangeValue: any) {
+  const value = useRef(initialValue());
+  const prevResetOnChangeValue = useRef(resetOnChangeValue);
+  if (prevResetOnChangeValue.current !== resetOnChangeValue) {
+    value.current = initialValue();
+    prevResetOnChangeValue.current = resetOnChangeValue;
+  }
+
+  return value;
+}
+
 export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
+  const { colors } = useTheme();
   const pluginContext = useContext(PluginContext);
 
   const prevState = usePrevious(props.exploreState);
   const prevDatasource = usePrevious(props.exploreState.datasource);
+  const prevChartStatus = usePrevious(props.chart.chartStatus);
 
   const [showDatasourceAlert, setShowDatasourceAlert] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const controlsTransferred = useSelector<
+    ExplorePageState,
+    string[] | undefined
+  >(state => state.explore.controlsTransferred);
+
+  const defaultTimeFilter = useSelector<ExplorePageState>(
+    state => state.common?.conf?.DEFAULT_TIME_FILTER,
+  );
+
+  const { form_data, actions } = props;
+  const { setControlValue } = actions;
+  const { x_axis, adhoc_filters } = form_data;
+
+  const previousXAxis = usePrevious(x_axis);
+
+  useEffect(() => {
+    if (
+      x_axis &&
+      x_axis !== previousXAxis &&
+      isTemporalColumn(x_axis, props.exploreState.datasource)
+    ) {
+      const noFilter =
+        !adhoc_filters ||
+        !adhoc_filters.find(
+          filter =>
+            filter.expressionType === 'SIMPLE' &&
+            filter.operator === Operators.TEMPORAL_RANGE &&
+            filter.subject === x_axis,
+        );
+      if (noFilter) {
+        confirm({
+          title: t('The X-axis is not on the filters list'),
+          content:
+            t(`The X-axis is not on the filters list which will prevent it from being used in
+            time range filters in dashboards. Would you like to add it to the filters list?`),
+          onOk: () => {
+            setControlValue('adhoc_filters', [
+              ...(adhoc_filters || []),
+              {
+                clause: CLAUSES.WHERE,
+                subject: x_axis,
+                operator: Operators.TEMPORAL_RANGE,
+                comparator: defaultTimeFilter || NO_TIME_RANGE,
+                expressionType: 'SIMPLE',
+              },
+            ]);
+          },
+        });
+      }
+    }
+  }, [
+    x_axis,
+    adhoc_filters,
+    setControlValue,
+    defaultTimeFilter,
+    previousXAxis,
+    props.exploreState.datasource,
+  ]);
+
+  useEffect(() => {
+    let shouldUpdateControls = false;
+    const removeDatasourceWarningFromControl = (
+      value: JsonValue | undefined,
+    ) => {
+      if (
+        typeof value === 'object' &&
+        isDefined(value) &&
+        'datasourceWarning' in value &&
+        value.datasourceWarning === true
+      ) {
+        shouldUpdateControls = true;
+        return { ...value, datasourceWarning: false };
+      }
+      return value;
+    };
+    if (
+      props.chart.chartStatus === 'success' &&
+      prevChartStatus !== 'success'
+    ) {
+      controlsTransferred?.forEach(controlName => {
+        shouldUpdateControls = false;
+        if (!isDefined(props.controls[controlName])) {
+          return;
+        }
+        const alteredControls = Array.isArray(props.controls[controlName].value)
+          ? ensureIsArray(props.controls[controlName].value)?.map(
+              removeDatasourceWarningFromControl,
+            )
+          : removeDatasourceWarningFromControl(
+              props.controls[controlName].value,
+            );
+        if (shouldUpdateControls) {
+          props.actions.setControlValue(controlName, alteredControls);
+        }
+      });
+    }
+  }, [
+    controlsTransferred,
+    prevChartStatus,
+    props.actions,
+    props.chart.chartStatus,
+    props.controls,
+  ]);
+
   useEffect(() => {
     if (
       prevDatasource &&
+      prevDatasource.type !== DatasourceType.Query &&
       (props.exploreState.datasource?.id !== prevDatasource.id ||
         props.exploreState.datasource?.type !== prevDatasource.type)
     ) {
@@ -268,15 +407,11 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
   } = useMemo(
     () =>
       getState(
-        props.form_data.viz_type,
+        form_data.viz_type,
         props.exploreState.datasource,
         props.datasource_type,
       ),
-    [
-      props.exploreState.datasource,
-      props.form_data.viz_type,
-      props.datasource_type,
-    ],
+    [props.exploreState.datasource, form_data.viz_type, props.datasource_type],
   );
 
   const resetTransferredControls = useCallback(() => {
@@ -353,6 +488,25 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
         ? baseDescription(exploreState, controls[name], chart)
         : baseDescription;
 
+    if (name === 'adhoc_filters') {
+      restProps.canDelete = (
+        valueToBeDeleted: Record<string, any>,
+        values: Record<string, any>[],
+      ) => {
+        const isTemporalRange = (filter: Record<string, any>) =>
+          filter.operator === Operators.TEMPORAL_RANGE;
+        if (isTemporalRange(valueToBeDeleted)) {
+          const count = values.filter(isTemporalRange).length;
+          if (count === 1) {
+            return t(
+              `You cannot delete the last temporal filter as it's used for time range filters in dashboards.`,
+            );
+          }
+        }
+        return true;
+      };
+    }
+
     return (
       <Control
         key={`control-${name}`}
@@ -366,6 +520,11 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
       />
     );
   };
+
+  const sectionHasHadNoErrors = useResetOnChangeRef(
+    () => ({}),
+    form_data.viz_type,
+  );
 
   const renderControlPanelSection = (
     section: ExpandedControlPanelSectionConfig,
@@ -394,6 +553,15 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
         );
       }),
     );
+
+    if (!hasErrors) {
+      sectionHasHadNoErrors.current[sectionId] = true;
+    }
+
+    const errorColor = sectionHasHadNoErrors.current[sectionId]
+      ? colors.error.base
+      : colors.alert.base;
+
     const PanelHeader = () => (
       <span data-test="collapsible-control-panel-header">
         <span
@@ -405,15 +573,22 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
           {label}
         </span>{' '}
         {description && (
-          // label is only used in tooltip id (should probably call this prop `id`)
-          <InfoTooltipWithTrigger label={sectionId} tooltip={description} />
+          <Tooltip id={sectionId} title={description}>
+            <Icons.InfoCircleOutlined css={iconStyles} />
+          </Tooltip>
         )}
         {hasErrors && (
-          <InfoTooltipWithTrigger
-            label="validation-errors"
-            bsStyle="danger"
-            tooltip="This section contains validation errors"
-          />
+          <Tooltip
+            id={`${kebabCase('validation-errors')}-tooltip`}
+            title={t('This section contains validation errors')}
+          >
+            <Icons.InfoCircleOutlined
+              css={css`
+                ${iconStyles};
+                color: ${errorColor};
+              `}
+            />
+          </Tooltip>
         )}
       </span>
     );
@@ -514,14 +689,26 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
     [handleClearFormClick, handleContinueClick, hasControlsTransferred],
   );
 
-  const dataTabTitle = useMemo(
-    () => (
+  const dataTabHasHadNoErrors = useResetOnChangeRef(
+    () => false,
+    form_data.viz_type,
+  );
+
+  const dataTabTitle = useMemo(() => {
+    if (!props.errorMessage) {
+      dataTabHasHadNoErrors.current = true;
+    }
+
+    const errorColor = dataTabHasHadNoErrors.current
+      ? colors.error.base
+      : colors.alert.base;
+
+    return (
       <>
         <span>{t('Data')}</span>
         {props.errorMessage && (
           <span
             css={(theme: SupersetTheme) => css`
-              font-size: ${theme.typography.sizes.xs}px;
               margin-left: ${theme.gridUnit * 2}px;
             `}
           >
@@ -531,20 +718,26 @@ export const ControlPanelsContainer = (props: ControlPanelsContainerProps) => {
               placement="right"
               title={props.errorMessage}
             >
-              <i className="fa fa-exclamation-circle text-danger fa-lg" />
+              <Icons.ExclamationCircleOutlined
+                css={css`
+                  ${iconStyles};
+                  color: ${errorColor};
+                `}
+              />
             </Tooltip>
           </span>
         )}
       </>
-    ),
-    [props.errorMessage],
-  );
+    );
+  }, [
+    colors.error.base,
+    colors.alert.base,
+    dataTabHasHadNoErrors,
+    props.errorMessage,
+  ]);
 
   const controlPanelRegistry = getChartControlPanelRegistry();
-  if (
-    !controlPanelRegistry.has(props.form_data.viz_type) &&
-    pluginContext.loading
-  ) {
+  if (!controlPanelRegistry.has(form_data.viz_type) && pluginContext.loading) {
     return <Loading />;
   }
 

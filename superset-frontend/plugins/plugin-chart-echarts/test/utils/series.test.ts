@@ -16,19 +16,65 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { getNumberFormatter, getTimeFormatter } from '@superset-ui/core';
+import {
+  DataRecord,
+  getNumberFormatter,
+  getTimeFormatter,
+} from '@superset-ui/core';
 import {
   dedupSeries,
   extractGroupbyLabel,
   extractSeries,
+  extractShowValueIndexes,
   formatSeriesName,
   getChartPadding,
   getLegendProps,
+  getOverMaxHiddenFormatter,
   sanitizeHtml,
+  sortAndFilterSeries,
 } from '../../src/utils/series';
-import { LegendOrientation, LegendType } from '../../src/types';
+import { LegendOrientation, LegendType, SortSeriesType } from '../../src/types';
 import { defaultLegendPadding } from '../../src/defaults';
 import { NULL_STRING } from '../../src/constants';
+
+test('sortAndFilterSeries', () => {
+  const data: DataRecord[] = [
+    { my_x_axis: 'abc', x: 1, y: 0, z: 2 },
+    { my_x_axis: 'foo', x: null, y: 10, z: 5 },
+    { my_x_axis: null, x: 4, y: 3, z: 7 },
+  ];
+
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Min, true),
+  ).toEqual(['y', 'x', 'z']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Min, false),
+  ).toEqual(['z', 'x', 'y']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Max, true),
+  ).toEqual(['x', 'z', 'y']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Max, false),
+  ).toEqual(['y', 'z', 'x']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Avg, true),
+  ).toEqual(['x', 'y', 'z']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Avg, false),
+  ).toEqual(['z', 'y', 'x']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Sum, true),
+  ).toEqual(['x', 'y', 'z']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Sum, false),
+  ).toEqual(['z', 'y', 'x']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Name, true),
+  ).toEqual(['x', 'y', 'z']);
+  expect(
+    sortAndFilterSeries(data, 'my_x_axis', [], SortSeriesType.Name, false),
+  ).toEqual(['z', 'y', 'x']);
+});
 
 describe('extractSeries', () => {
   it('should generate a valid ECharts timeseries series object', () => {
@@ -203,6 +249,124 @@ describe('extractGroupbyLabel', () => {
       }),
     ).toEqual('');
     expect(extractGroupbyLabel({})).toEqual('');
+  });
+});
+
+describe('extractShowValueIndexes', () => {
+  it('should return the latest index for stack', () => {
+    expect(
+      extractShowValueIndexes(
+        [
+          {
+            id: 'abc',
+            name: 'abc',
+            data: [
+              ['2000-01-01', null],
+              ['2000-02-01', 0],
+              ['2000-03-01', 1],
+              ['2000-04-01', 0],
+              ['2000-05-01', null],
+              ['2000-06-01', 0],
+              ['2000-07-01', 2],
+              ['2000-08-01', 3],
+              ['2000-09-01', null],
+              ['2000-10-01', null],
+            ],
+          },
+          {
+            id: 'def',
+            name: 'def',
+            data: [
+              ['2000-01-01', null],
+              ['2000-02-01', 0],
+              ['2000-03-01', null],
+              ['2000-04-01', 0],
+              ['2000-05-01', null],
+              ['2000-06-01', 0],
+              ['2000-07-01', 2],
+              ['2000-08-01', 3],
+              ['2000-09-01', null],
+              ['2000-10-01', 0],
+            ],
+          },
+          {
+            id: 'def',
+            name: 'def',
+            data: [
+              ['2000-01-01', null],
+              ['2000-02-01', null],
+              ['2000-03-01', null],
+              ['2000-04-01', null],
+              ['2000-05-01', null],
+              ['2000-06-01', 3],
+              ['2000-07-01', null],
+              ['2000-08-01', null],
+              ['2000-09-01', null],
+              ['2000-10-01', null],
+            ],
+          },
+        ],
+        { stack: true, onlyTotal: false, isHorizontal: false },
+      ),
+    ).toEqual([undefined, 1, 0, 1, undefined, 2, 1, 1, undefined, 1]);
+  });
+
+  it('should handle the negative numbers for total only', () => {
+    expect(
+      extractShowValueIndexes(
+        [
+          {
+            id: 'abc',
+            name: 'abc',
+            data: [
+              ['2000-01-01', null],
+              ['2000-02-01', 0],
+              ['2000-03-01', -1],
+              ['2000-04-01', 0],
+              ['2000-05-01', null],
+              ['2000-06-01', 0],
+              ['2000-07-01', -2],
+              ['2000-08-01', -3],
+              ['2000-09-01', null],
+              ['2000-10-01', null],
+            ],
+          },
+          {
+            id: 'def',
+            name: 'def',
+            data: [
+              ['2000-01-01', null],
+              ['2000-02-01', 0],
+              ['2000-03-01', null],
+              ['2000-04-01', 0],
+              ['2000-05-01', null],
+              ['2000-06-01', 0],
+              ['2000-07-01', 2],
+              ['2000-08-01', -3],
+              ['2000-09-01', null],
+              ['2000-10-01', 0],
+            ],
+          },
+          {
+            id: 'def',
+            name: 'def',
+            data: [
+              ['2000-01-01', null],
+              ['2000-02-01', 0],
+              ['2000-03-01', null],
+              ['2000-04-01', 1],
+              ['2000-05-01', null],
+              ['2000-06-01', 0],
+              ['2000-07-01', -2],
+              ['2000-08-01', 3],
+              ['2000-09-01', null],
+              ['2000-10-01', 0],
+            ],
+          },
+        ],
+        { stack: true, onlyTotal: true, isHorizontal: false },
+      ),
+    ).toEqual([undefined, 1, 0, 2, undefined, 1, 1, 2, undefined, 1]);
   });
 });
 
@@ -415,6 +579,18 @@ describe('formatSeriesName', () => {
   describe('sanitizeHtml', () => {
     it('should remove html tags from series name', () => {
       expect(sanitizeHtml(NULL_STRING)).toEqual('&lt;NULL&gt;');
+    });
+  });
+
+  describe('getOverMaxHiddenFormatter', () => {
+    it('should hide value if greater than max', () => {
+      const formatter = getOverMaxHiddenFormatter({ max: 81000 });
+      expect(formatter.format(84500)).toEqual('');
+    });
+    it('should show value if less or equal than max', () => {
+      const formatter = getOverMaxHiddenFormatter({ max: 81000 });
+      expect(formatter.format(81000)).toEqual('81000');
+      expect(formatter.format(50000)).toEqual('50000');
     });
   });
 });

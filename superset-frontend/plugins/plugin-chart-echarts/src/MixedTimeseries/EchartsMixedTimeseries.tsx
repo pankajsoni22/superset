@@ -17,6 +17,12 @@
  * under the License.
  */
 import React, { useCallback } from 'react';
+import {
+  AxisType,
+  DataRecordValue,
+  DTTM_ALIAS,
+  BinaryQueryObjectFilterClause,
+} from '@superset-ui/core';
 import { EchartsMixedTimeseriesChartTransformedProps } from './types';
 import Echart from '../components/Echart';
 import { EventHandlers } from '../types';
@@ -33,71 +39,85 @@ export default function EchartsMixedTimeseries({
   groupbyB,
   selectedValues,
   formData,
+  emitCrossFilters,
   seriesBreakdown,
+  onContextMenu,
+  xValueFormatter,
+  xAxis,
+  refs,
 }: EchartsMixedTimeseriesChartTransformedProps) {
   const isFirstQuery = useCallback(
     (seriesIndex: number) => seriesIndex < seriesBreakdown,
     [seriesBreakdown],
   );
 
-  const handleChange = useCallback(
-    (values: string[], seriesIndex: number) => {
-      const emitFilter = isFirstQuery(seriesIndex)
-        ? formData.emitFilter
-        : formData.emitFilterB;
-      if (!emitFilter) {
-        return;
+  const getCrossFilterDataMask = useCallback(
+    (seriesName, seriesIndex) => {
+      const selected: string[] = Object.values(selectedValues || {});
+      let values: string[];
+      if (selected.includes(seriesName)) {
+        values = selected.filter(v => v !== seriesName);
+      } else {
+        values = [seriesName];
       }
 
       const currentGroupBy = isFirstQuery(seriesIndex) ? groupby : groupbyB;
       const currentLabelMap = isFirstQuery(seriesIndex) ? labelMap : labelMapB;
       const groupbyValues = values
-        .map(value => currentLabelMap[value])
+        .map(value => currentLabelMap?.[value])
         .filter(value => !!value);
 
-      setDataMask({
-        extraFormData: {
-          // @ts-ignore
-          filters:
-            values.length === 0
-              ? []
-              : [
-                  ...currentGroupBy.map((col, idx) => {
-                    const val = groupbyValues.map(v => v[idx]);
-                    if (val === null || val === undefined)
+      return {
+        dataMask: {
+          extraFormData: {
+            // @ts-ignore
+            filters:
+              values.length === 0
+                ? []
+                : [
+                    ...currentGroupBy.map((col, idx) => {
+                      const val: DataRecordValue[] = groupbyValues.map(
+                        v => v[idx],
+                      );
+                      if (val === null || val === undefined)
+                        return {
+                          col,
+                          op: 'IS NULL' as const,
+                        };
                       return {
                         col,
-                        op: 'IS NULL',
+                        op: 'IN' as const,
+                        val: val as (string | number | boolean)[],
                       };
-                    return {
-                      col,
-                      op: 'IN',
-                      val: val as (string | number | boolean)[],
-                    };
-                  }),
-                ],
+                    }),
+                  ],
+          },
+          filterState: {
+            value: !groupbyValues.length ? null : groupbyValues,
+            selectedValues: values.length ? values : null,
+          },
         },
-        filterState: {
-          value: !groupbyValues.length ? null : groupbyValues,
-          selectedValues: values.length ? values : null,
-        },
-      });
+        isCurrentValueSelected: selected.includes(seriesName),
+      };
     },
-    [groupby, groupbyB, labelMap, labelMapB, setDataMask, selectedValues],
+    [groupby, groupbyB, isFirstQuery, labelMap, labelMapB, selectedValues],
+  );
+
+  const handleChange = useCallback(
+    (seriesName: string, seriesIndex: number) => {
+      if (!emitCrossFilters) {
+        return;
+      }
+
+      setDataMask(getCrossFilterDataMask(seriesName, seriesIndex).dataMask);
+    },
+    [emitCrossFilters, setDataMask, getCrossFilterDataMask],
   );
 
   const eventHandlers: EventHandlers = {
     click: props => {
       const { seriesName, seriesIndex } = props;
-      const values: string[] = Object.values(selectedValues);
-      if (values.includes(seriesName)) {
-        handleChange(
-          values.filter(v => v !== seriesName),
-          seriesIndex,
-        );
-      } else {
-        handleChange([seriesName], seriesIndex);
-      }
+      handleChange(seriesName, seriesIndex);
     },
     mouseout: () => {
       currentSeries.name = '';
@@ -105,10 +125,56 @@ export default function EchartsMixedTimeseries({
     mouseover: params => {
       currentSeries.name = params.seriesName;
     },
+    contextmenu: eventParams => {
+      if (onContextMenu) {
+        eventParams.event.stop();
+        const { data, seriesName, seriesIndex } = eventParams;
+        const pointerEvent = eventParams.event.event;
+        const drillToDetailFilters: BinaryQueryObjectFilterClause[] = [];
+        if (data) {
+          const values = [
+            ...(eventParams.name ? [eventParams.name] : []),
+            ...(isFirstQuery(seriesIndex) ? labelMap : labelMapB)[
+              eventParams.seriesName
+            ],
+          ];
+          if (xAxis.type === AxisType.time) {
+            drillToDetailFilters.push({
+              col:
+                xAxis.label === DTTM_ALIAS
+                  ? formData.granularitySqla
+                  : xAxis.label,
+              grain: formData.timeGrainSqla,
+              op: '==',
+              val: data[0],
+              formattedVal: xValueFormatter(data[0]),
+            });
+          }
+          [
+            ...(xAxis.type === AxisType.category ? [xAxis.label] : []),
+            ...(isFirstQuery(seriesIndex)
+              ? formData.groupby
+              : formData.groupbyB),
+          ].forEach((dimension, i) =>
+            drillToDetailFilters.push({
+              col: dimension,
+              op: '==',
+              val: values[i],
+              formattedVal: String(values[i]),
+            }),
+          );
+        }
+        onContextMenu(pointerEvent.clientX, pointerEvent.clientY, {
+          drillToDetail: drillToDetailFilters,
+          crossFilter: getCrossFilterDataMask(seriesName, seriesIndex),
+        });
+      }
+    },
   };
 
   return (
     <Echart
+      refs={refs}
       height={height}
       width={width}
       echartOptions={echartOptions}

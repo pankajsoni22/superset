@@ -16,11 +16,16 @@
 # under the License.
 # pylint: disable=unused-argument, import-outside-toplevel, protected-access
 
-from flask.ctx import AppContext
-from pytest import raises
+from datetime import datetime
+from typing import Optional
+
+import pytest
+
+from tests.unit_tests.db_engine_specs.utils import assert_convert_dttm
+from tests.unit_tests.fixtures.common import dttm
 
 
-def test_odbc_impersonation(app_context: AppContext) -> None:
+def test_odbc_impersonation() -> None:
     """
     Test ``get_url_for_impersonation`` method when driver == odbc.
 
@@ -36,7 +41,7 @@ def test_odbc_impersonation(app_context: AppContext) -> None:
     assert url.query["DelegationUID"] == username
 
 
-def test_jdbc_impersonation(app_context: AppContext) -> None:
+def test_jdbc_impersonation() -> None:
     """
     Test ``get_url_for_impersonation`` method when driver == jdbc.
 
@@ -52,7 +57,7 @@ def test_jdbc_impersonation(app_context: AppContext) -> None:
     assert url.query["impersonation_target"] == username
 
 
-def test_sadrill_impersonation(app_context: AppContext) -> None:
+def test_sadrill_impersonation() -> None:
     """
     Test ``get_url_for_impersonation`` method when driver == sadrill.
 
@@ -68,7 +73,7 @@ def test_sadrill_impersonation(app_context: AppContext) -> None:
     assert url.query["impersonation_target"] == username
 
 
-def test_invalid_impersonation(app_context: AppContext) -> None:
+def test_invalid_impersonation() -> None:
     """
     Test ``get_url_for_impersonation`` method when driver == foobar.
 
@@ -83,5 +88,21 @@ def test_invalid_impersonation(app_context: AppContext) -> None:
     url = URL("drill+foobar")
     username = "DoAsUser"
 
-    with raises(SupersetDBAPIProgrammingError):
+    with pytest.raises(SupersetDBAPIProgrammingError):
         DrillEngineSpec.get_url_for_impersonation(url, True, username)
+
+
+@pytest.mark.parametrize(
+    "target_type,expected_result",
+    [
+        ("Date", "TO_DATE('2019-01-02', 'yyyy-MM-dd')"),
+        ("TimeStamp", "TO_TIMESTAMP('2019-01-02 03:04:05', 'yyyy-MM-dd HH:mm:ss')"),
+        ("UnknownType", None),
+    ],
+)
+def test_convert_dttm(
+    target_type: str, expected_result: Optional[str], dttm: datetime
+) -> None:
+    from superset.db_engine_specs.drill import DrillEngineSpec as spec
+
+    assert_convert_dttm(spec, target_type, expected_result, dttm)

@@ -24,8 +24,12 @@ import {
   ControlSetRow,
   sharedControls,
 } from '@superset-ui/chart-controls';
-import { DEFAULT_LEGEND_FORM_DATA } from './constants';
+import {
+  DEFAULT_LEGEND_FORM_DATA,
+  DEFAULT_SORT_SERIES_DATA,
+} from './constants';
 import { DEFAULT_FORM_DATA } from './Timeseries/constants';
+import { SortSeriesType } from './types';
 
 const { legendMargin, legendOrientation, legendType, showLegend } =
   DEFAULT_LEGEND_FORM_DATA;
@@ -60,10 +64,10 @@ const legendTypeControl: ControlSetItem = {
   config: {
     type: 'SelectControl',
     freeForm: false,
-    label: 'Type',
+    label: t('Type'),
     choices: [
-      ['scroll', 'Scroll'],
-      ['plain', 'Plain'],
+      ['scroll', t('Scroll')],
+      ['plain', t('Plain')],
     ],
     default: legendType,
     renderTrigger: true,
@@ -78,16 +82,16 @@ const legendOrientationControl: ControlSetItem = {
   config: {
     type: 'SelectControl',
     freeForm: false,
-    label: 'Orientation',
+    label: t('Orientation'),
     choices: [
-      ['top', 'Top'],
-      ['bottom', 'Bottom'],
-      ['left', 'Left'],
-      ['right', 'Right'],
+      ['top', t('Top')],
+      ['bottom', t('Bottom')],
+      ['left', t('Left')],
+      ['right', t('Right')],
     ],
     default: legendOrientation,
     renderTrigger: true,
-    description: t('Legend type'),
+    description: t('Legend Orientation'),
     visibility: ({ controls }: ControlPanelsContainerProps) =>
       Boolean(controls?.show_legend?.value),
   },
@@ -211,4 +215,42 @@ export const richTooltipSection: ControlSetRow[] = [
   [richTooltipControl],
   [tooltipSortByMetricControl],
   [tooltipTimeFormatControl],
+];
+
+const sortSeriesType: ControlSetItem = {
+  name: 'sort_series_type',
+  config: {
+    type: 'SelectControl',
+    freeForm: false,
+    label: t('Sort Series By'),
+    choices: [
+      [SortSeriesType.Name, t('Category name')],
+      [SortSeriesType.Sum, t('Total value')],
+      [SortSeriesType.Min, t('Minimum value')],
+      [SortSeriesType.Max, t('Maximum value')],
+      [SortSeriesType.Avg, t('Average value')],
+    ],
+    default: DEFAULT_SORT_SERIES_DATA.sort_series_type,
+    renderTrigger: true,
+    description: t(
+      'Based on what should series be ordered on the chart and legend',
+    ),
+  },
+};
+
+const sortSeriesAscending: ControlSetItem = {
+  name: 'sort_series_ascending',
+  config: {
+    type: 'CheckboxControl',
+    label: t('Sort Series Ascending'),
+    default: DEFAULT_SORT_SERIES_DATA.sort_series_ascending,
+    renderTrigger: true,
+    description: t('Sort series in ascending order'),
+  },
+};
+
+export const seriesOrderSection: ControlSetRow[] = [
+  [<div className="section-header">{t('Series Order')}</div>],
+  [sortSeriesType],
+  [sortSeriesAscending],
 ];

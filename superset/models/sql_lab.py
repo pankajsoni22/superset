@@ -15,15 +15,18 @@
 # specific language governing permissions and limitations
 # under the License.
 """A collection of ORM sqlalchemy models for SQL Lab"""
+import inspect
+import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Type, TYPE_CHECKING
 
 import simplejson as json
 import sqlalchemy as sqla
-from flask import Markup
+from flask import current_app, Markup
 from flask_appbuilder import Model
 from flask_appbuilder.models.decorators import renders
+from flask_babel import gettext as __
 from humanize import naturaltime
 from sqlalchemy import (
     Boolean,
@@ -39,24 +42,28 @@ from sqlalchemy import (
 from sqlalchemy.engine.url import URL
 from sqlalchemy.orm import backref, relationship
 
-from superset import security_manager
+from superset import is_feature_enabled, security_manager
+from superset.jinja_context import BaseTemplateProcessor, get_template_processor
 from superset.models.helpers import (
     AuditMixinNullable,
     ExploreMixin,
     ExtraJSONMixin,
     ImportExportMixin,
 )
-from superset.models.tags import QueryUpdater
 from superset.sql_parse import CtasMethod, ParsedQuery, Table
 from superset.sqllab.limiting_factor import LimitingFactor
-from superset.superset_typing import ResultSetColumnType
 from superset.utils.core import GenericDataType, QueryStatus, user_label
 
 if TYPE_CHECKING:
     from superset.db_engine_specs import BaseEngineSpec
 
 
-class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-method
+logger = logging.getLogger(__name__)
+
+
+class Query(
+    Model, ExtraJSONMixin, ExploreMixin
+):  # pylint: disable=abstract-method,too-many-public-methods
     """ORM model for SQL query
 
     Now that SQL Lab support multi-statement execution, an entry in this
@@ -104,7 +111,7 @@ class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-me
     start_running_time = Column(Numeric(precision=20, scale=6))
     end_time = Column(Numeric(precision=20, scale=6))
     end_result_backend_time = Column(Numeric(precision=20, scale=6))
-    tracking_url = Column(Text)
+    tracking_url_raw = Column(Text, name="tracking_url")
 
     changed_on = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True
@@ -118,6 +125,9 @@ class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-me
     user = relationship(security_manager.user_model, foreign_keys=[user_id])
 
     __table_args__ = (sqla.Index("ti_user_id_changed_on", user_id, changed_on),)
+
+    def get_template_processor(self, **kwargs: Any) -> BaseTemplateProcessor:
+        return get_template_processor(query=self, database=self.database, **kwargs)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -173,7 +183,7 @@ class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-me
         return list(ParsedQuery(self.sql).tables)
 
     @property
-    def columns(self) -> List[ResultSetColumnType]:
+    def columns(self) -> List[Dict[str, Any]]:
         bool_types = ("BOOL",)
         num_types = (
             "DOUBLE",
@@ -207,11 +217,24 @@ class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-me
             computed_column["column_name"] = col.get("name")
             computed_column["groupby"] = True
             columns.append(computed_column)
-        return columns  # type: ignore
+        return columns
 
     @property
     def data(self) -> Dict[str, Any]:
+        order_by_choices = []
+        for col in self.columns:
+            column_name = str(col.get("column_name") or "")
+            order_by_choices.append(
+                (json.dumps([column_name, True]), f"{column_name} " + __("[asc]"))
+            )
+            order_by_choices.append(
+                (json.dumps([column_name, False]), f"{column_name} " + __("[desc]"))
+            )
+
         return {
+            "time_grain_sqla": [
+                (g.duration, g.name) for g in self.database.grains() or []
+            ],
             "filter_select": True,
             "name": self.tab_name,
             "columns": self.columns,
@@ -221,6 +244,8 @@ class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-me
             "sql": self.sql,
             "owners": self.owners_data,
             "database": {"id": self.database_id, "backend": self.database.backend},
+            "order_by_choices": order_by_choices,
+            "schema": self.schema,
         }
 
     def raise_for_access(self) -> None:
@@ -264,12 +289,20 @@ class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-me
     def main_dttm_col(self) -> Optional[str]:
         for col in self.columns:
             if col.get("is_dttm"):
-                return col.get("column_name")  # type: ignore
+                return col.get("column_name")
         return None
 
     @property
     def dttm_cols(self) -> List[Any]:
         return [col.get("column_name") for col in self.columns if col.get("is_dttm")]
+
+    @property
+    def schema_perm(self) -> str:
+        return f"{self.database.database_name}.{self.schema}"
+
+    @property
+    def perm(self) -> str:
+        return f"[{self.database.database_name}].[{self.tab_name}](id:{self.id})"
 
     @property
     def default_endpoint(self) -> str:
@@ -278,6 +311,35 @@ class Query(Model, ExtraJSONMixin, ExploreMixin):  # pylint: disable=abstract-me
     @staticmethod
     def get_extra_cache_keys(query_obj: Dict[str, Any]) -> List[str]:
         return []
+
+    @property
+    def tracking_url(self) -> Optional[str]:
+        """
+        Transfrom tracking url at run time because the exact URL may depends
+        on query properties such as execution and finish time.
+        """
+        transform = current_app.config.get("TRACKING_URL_TRANSFORMER")
+        url = self.tracking_url_raw
+        if url and transform:
+            sig = inspect.signature(transform)
+            # for backward compatibility, users may define a transformer function
+            # with only one parameter (`url`).
+            args = [url, self][: len(sig.parameters)]
+            url = transform(*args)
+            logger.debug("Transformed tracking url: %s", url)
+        return url
+
+    @tracking_url.setter
+    def tracking_url(self, value: str) -> None:
+        self.tracking_url_raw = value
+
+    def get_column(self, column_name: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not column_name:
+            return None
+        for col in self.columns:
+            if col.get("column_name") == column_name:
+                return col
+        return None
 
 
 class SavedQuery(Model, AuditMixinNullable, ExtraJSONMixin, ImportExportMixin):
@@ -291,6 +353,7 @@ class SavedQuery(Model, AuditMixinNullable, ExtraJSONMixin, ImportExportMixin):
     label = Column(String(256))
     description = Column(Text)
     sql = Column(Text)
+    template_parameters = Column(Text)
     user = relationship(
         security_manager.user_model,
         backref=backref("saved_queries", cascade="all, delete-orphan"),
@@ -303,6 +366,14 @@ class SavedQuery(Model, AuditMixinNullable, ExtraJSONMixin, ImportExportMixin):
     )
     rows = Column(Integer, nullable=True)
     last_run = Column(DateTime, nullable=True)
+    if is_feature_enabled("TAGGING_SYSTEM"):
+        tags = relationship(
+            "Tag",
+            secondary="tagged_object",
+            primaryjoin="and_(SavedQuery.id == TaggedObject.object_id)",
+            secondaryjoin="and_(TaggedObject.tag_id == Tag.id, "
+            "TaggedObject.object_type == 'saved_query')",
+        )
 
     export_parent = "database"
     export_fields = [
@@ -359,7 +430,6 @@ class SavedQuery(Model, AuditMixinNullable, ExtraJSONMixin, ImportExportMixin):
 
 
 class TabState(Model, AuditMixinNullable, ExtraJSONMixin):
-
     __tablename__ = "tab_state"
 
     # basic info
@@ -422,7 +492,6 @@ class TabState(Model, AuditMixinNullable, ExtraJSONMixin):
 
 
 class TableSchema(Model, AuditMixinNullable, ExtraJSONMixin):
-
     __tablename__ = "table_schema"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -455,9 +524,3 @@ class TableSchema(Model, AuditMixinNullable, ExtraJSONMixin):
             "description": description,
             "expanded": self.expanded,
         }
-
-
-# events for updating tags
-sqla.event.listen(SavedQuery, "after_insert", QueryUpdater.after_insert)
-sqla.event.listen(SavedQuery, "after_update", QueryUpdater.after_update)
-sqla.event.listen(SavedQuery, "after_delete", QueryUpdater.after_delete)

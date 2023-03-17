@@ -30,6 +30,15 @@ CHANGE_ME_SECRET_KEY = "CHANGE_ME_TO_A_COMPLEX_RANDOM_SECRET"
 # UUID for the examples database
 EXAMPLES_DB_UUID = "a2dc77af-e654-49bb-b321-40f6b559a1ee"
 
+PASSWORD_MASK = "X" * 10
+
+NO_TIME_RANGE = "No filter"
+
+QUERY_CANCEL_KEY = "cancel_query"
+QUERY_EARLY_CANCEL_KEY = "early_cancel_query"
+
+LRU_CACHE_MAX_SIZE = 256
+
 
 class RouteMethod:  # pylint: disable=too-few-public-methods
     """
@@ -111,6 +120,7 @@ MODEL_API_RW_METHOD_PERMISSION_MAP = {
     "put": "write",
     "related": "read",
     "related_objects": "read",
+    "tables": "read",
     "schemas": "read",
     "select_star": "read",
     "table_metadata": "read",
@@ -132,6 +142,14 @@ MODEL_API_RW_METHOD_PERMISSION_MAP = {
     "validate_sql": "read",
     "get_data": "read",
     "samples": "read",
+    "delete_ssh_tunnel": "write",
+    "get_updated_since": "read",
+    "stop_query": "read",
+    "schemas_access_for_file_upload": "read",
+    "get_objects": "read",
+    "get_all_objects": "read",
+    "add_objects": "write",
+    "delete_object": "write",
 }
 
 EXTRA_FORM_DATA_APPEND_KEYS = {

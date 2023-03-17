@@ -22,6 +22,7 @@ import rison from 'rison';
 
 import { addDangerToast } from 'src/components/MessageToasts/actions';
 import { getClientErrorObject } from 'src/utils/getClientErrorObject';
+import { isFeatureEnabled, FeatureFlag } from 'src/featureFlags';
 
 export const SET_ALL_SLICES = 'SET_ALL_SLICES';
 const FETCH_SLICES_PAGE_SIZE = 200;
@@ -46,7 +47,6 @@ export function fetchAllSlicesFailed(error) {
 
 export function fetchSlices(
   userId,
-  excludeFilterBox,
   dispatch,
   filter_value,
   sortColumn = 'changed_on',
@@ -55,6 +55,14 @@ export function fetchSlices(
   const additional_filters = filter_value
     ? [{ col: 'slice_name', opr: 'chart_all_text', value: filter_value }]
     : [];
+
+  if (isFeatureEnabled(FeatureFlag.DASHBOARD_NATIVE_FILTERS)) {
+    additional_filters.push({
+      col: 'viz_type',
+      opr: 'neq',
+      value: 'filter_box',
+    });
+  }
 
   const cloneSlices = { ...slices };
 
@@ -72,6 +80,7 @@ export function fetchSlices(
         'id',
         'params',
         'slice_name',
+        'thumbnail_url',
         'url',
         'viz_type',
       ],
@@ -83,11 +92,7 @@ export function fetchSlices(
     })}`,
   })
     .then(({ json }) => {
-      let { result } = json;
-      // disable add filter_box viz to dashboard
-      if (excludeFilterBox) {
-        result = result.filter(slice => slice.viz_type !== 'filter_box');
-      }
+      const { result } = json;
       result.forEach(slice => {
         let form_data = JSON.parse(slice.params);
         form_data = {
@@ -114,6 +119,7 @@ export function fetchSlices(
           viz_type: slice.viz_type,
           modified: slice.changed_on_delta_humanized,
           changed_on_humanized: slice.changed_on_delta_humanized,
+          thumbnail_url: slice.thumbnail_url,
         };
       });
 
@@ -133,46 +139,31 @@ export function fetchSlices(
     );
 }
 
-export function fetchAllSlices(userId, excludeFilterBox = false) {
+export function fetchAllSlices(userId) {
   return (dispatch, getState) => {
     const { sliceEntities } = getState();
     if (sliceEntities.lastUpdated === 0) {
       dispatch(fetchAllSlicesStarted());
-      return fetchSlices(userId, excludeFilterBox, dispatch, undefined);
+      return fetchSlices(userId, dispatch, undefined);
     }
 
     return dispatch(setAllSlices(sliceEntities.slices));
   };
 }
 
-export function fetchSortedSlices(
-  userId,
-  excludeFilterBox = false,
-  order_column,
-) {
+export function fetchSortedSlices(userId, order_column) {
   return dispatch => {
     dispatch(fetchAllSlicesStarted());
-    return fetchSlices(
-      userId,
-      excludeFilterBox,
-      dispatch,
-      undefined,
-      order_column,
-    );
+    return fetchSlices(userId, dispatch, undefined, order_column);
   };
 }
 
-export function fetchFilteredSlices(
-  userId,
-  excludeFilterBox = false,
-  filter_value,
-) {
+export function fetchFilteredSlices(userId, filter_value) {
   return (dispatch, getState) => {
     dispatch(fetchAllSlicesStarted());
     const { sliceEntities } = getState();
     return fetchSlices(
       userId,
-      excludeFilterBox,
       dispatch,
       filter_value,
       undefined,

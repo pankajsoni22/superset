@@ -18,8 +18,8 @@ import json
 import logging
 from datetime import datetime
 from io import BytesIO
-from typing import Any, Optional
-from zipfile import ZipFile
+from typing import Any, cast, Optional
+from zipfile import is_zipfile, ZipFile
 
 from flask import redirect, request, Response, send_file, url_for
 from flask_appbuilder.api import expose, protect, rison, safe
@@ -50,8 +50,11 @@ from superset.charts.dao import ChartDAO
 from superset.charts.filters import (
     ChartAllTextFilter,
     ChartCertifiedFilter,
+    ChartCreatedByMeFilter,
     ChartFavoriteFilter,
     ChartFilter,
+    ChartHasCreatedByFilter,
+    ChartTagFilter,
 )
 from superset.charts.schemas import (
     CHART_SCHEMAS,
@@ -64,12 +67,16 @@ from superset.charts.schemas import (
     screenshot_query_schema,
     thumbnail_query_schema,
 )
-from superset.commands.importers.exceptions import NoValidFilesFoundError
+from superset.commands.importers.exceptions import (
+    IncorrectFormatError,
+    NoValidFilesFoundError,
+)
 from superset.commands.importers.v1.utils import get_contents_from_bundle
 from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP, RouteMethod
 from superset.extensions import event_logger
 from superset.models.slice import Slice
 from superset.tasks.thumbnails import cache_chart_thumbnail
+from superset.tasks.utils import get_current_user
 from superset.utils.screenshots import ChartScreenshot
 from superset.utils.urls import get_url_path
 from superset.views.base_api import (
@@ -79,7 +86,7 @@ from superset.views.base_api import (
     requires_json,
     statsd_metrics,
 )
-from superset.views.filters import FilterRelatedOwners
+from superset.views.filters import BaseFilterRelatedUsers, FilterRelatedOwners
 
 logger = logging.getLogger(__name__)
 config = app.config
@@ -114,20 +121,29 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "cache_timeout",
         "certified_by",
         "certification_details",
+        "changed_on_delta_humanized",
         "dashboards.dashboard_title",
         "dashboards.id",
         "dashboards.json_metadata",
         "description",
+        "id",
         "owners.first_name",
         "owners.id",
         "owners.last_name",
         "owners.username",
+        "dashboards.id",
+        "dashboards.dashboard_title",
         "params",
         "slice_name",
+        "thumbnail_url",
+        "url",
         "viz_type",
         "query_context",
         "is_managed_externally",
     ]
+    if is_feature_enabled("TAGGING_SYSTEM"):
+        show_columns += ["tags.id", "tags.name", "tags.type"]
+
     show_select_columns = show_columns + ["table.id"]
     list_columns = [
         "is_managed_externally",
@@ -143,6 +159,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "created_by.first_name",
         "created_by.id",
         "created_by.last_name",
+        "created_on_delta_humanized",
         "datasource_id",
         "datasource_name_text",
         "datasource_type",
@@ -159,6 +176,8 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "owners.id",
         "owners.last_name",
         "owners.username",
+        "dashboards.id",
+        "dashboards.dashboard_title",
         "params",
         "slice_name",
         "table.default_endpoint",
@@ -167,6 +186,8 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "url",
         "viz_type",
     ]
+    if is_feature_enabled("TAGGING_SYSTEM"):
+        list_columns += ["tags.id", "tags.name", "tags.type"]
     list_select_columns = list_columns + ["changed_by_fk", "changed_on"]
     order_columns = [
         "changed_by.first_name",
@@ -184,24 +205,28 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "created_by",
         "changed_by",
         "last_saved_at",
-        "last_saved_by.id",
-        "last_saved_by.first_name",
-        "last_saved_by.last_name",
+        "last_saved_by",
         "datasource_id",
         "datasource_name",
         "datasource_type",
         "description",
         "id",
         "owners",
+        "dashboards",
         "slice_name",
         "viz_type",
     ]
+    if is_feature_enabled("TAGGING_SYSTEM"):
+        search_columns += ["tags"]
     base_order = ("changed_on", "desc")
     base_filters = [["id", ChartFilter, lambda: []]]
     search_filters = {
         "id": [ChartFavoriteFilter, ChartCertifiedFilter],
         "slice_name": [ChartAllTextFilter],
+        "created_by": [ChartHasCreatedByFilter, ChartCreatedByMeFilter],
     }
+    if is_feature_enabled("TAGGING_SYSTEM"):
+        search_filters["tags"] = [ChartTagFilter]
 
     # Will just affect _info endpoint
     edit_columns = ["slice_name"]
@@ -228,7 +253,10 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "slices": ("slice_name", "asc"),
         "owners": ("first_name", "asc"),
     }
-
+    base_related_field_filters = {
+        "owners": [["id", BaseFilterRelatedUsers, lambda: []]],
+        "created_by": [["id", BaseFilterRelatedUsers, lambda: []]],
+    }
     related_field_filters = {
         "owners": RelatedFieldFilter("first_name", FilterRelatedOwners),
         "created_by": RelatedFieldFilter("first_name", FilterRelatedOwners),
@@ -538,11 +566,11 @@ class ChartRestApi(BaseSupersetModelRestApi):
         # Don't shrink the image if thumb_size is not specified
         thumb_size = rison_dict.get("thumb_size") or window_size
 
-        chart = self.datamodel.get(pk, self._base_filters)
+        chart = cast(Slice, self.datamodel.get(pk, self._base_filters))
         if not chart:
             return self.response_404()
 
-        chart_url = get_url_path("Superset.slice", slice_id=chart.id, standalone="true")
+        chart_url = get_url_path("Superset.slice", slice_id=chart.id)
         screenshot_obj = ChartScreenshot(chart_url, chart.digest)
         cache_key = screenshot_obj.cache_key(window_size, thumb_size)
         image_url = get_url_path(
@@ -551,14 +579,13 @@ class ChartRestApi(BaseSupersetModelRestApi):
 
         def trigger_celery() -> WerkzeugResponse:
             logger.info("Triggering screenshot ASYNC")
-            kwargs = {
-                "url": chart_url,
-                "digest": chart.digest,
-                "force": True,
-                "window_size": window_size,
-                "thumb_size": thumb_size,
-            }
-            cache_chart_thumbnail.delay(**kwargs)
+            cache_chart_thumbnail.delay(
+                current_user=get_current_user(),
+                chart_id=chart.id,
+                force=True,
+                window_size=window_size,
+                thumb_size=thumb_size,
+            )
             return self.response(
                 202, cache_key=cache_key, chart_url=chart_url, image_url=image_url
             )
@@ -661,16 +688,21 @@ class ChartRestApi(BaseSupersetModelRestApi):
             500:
               $ref: '#/components/responses/500'
         """
-        chart = self.datamodel.get(pk, self._base_filters)
+        chart = cast(Slice, self.datamodel.get(pk, self._base_filters))
         if not chart:
             return self.response_404()
 
-        url = get_url_path("Superset.slice", slice_id=chart.id, standalone="true")
+        current_user = get_current_user()
+        url = get_url_path("Superset.slice", slice_id=chart.id)
         if kwargs["rison"].get("force", False):
             logger.info(
                 "Triggering thumbnail compute (chart id: %s) ASYNC", str(chart.id)
             )
-            cache_chart_thumbnail.delay(url, chart.digest, force=True)
+            cache_chart_thumbnail.delay(
+                current_user=current_user,
+                chart_id=chart.id,
+                force=True,
+            )
             return self.response(202, message="OK Async")
         # fetch the chart screenshot using the current user and cache if set
         screenshot = ChartScreenshot(url, chart.digest).get_from_cache(
@@ -682,7 +714,11 @@ class ChartRestApi(BaseSupersetModelRestApi):
             logger.info(
                 "Triggering thumbnail compute (chart id: %s) ASYNC", str(chart.id)
             )
-            cache_chart_thumbnail.delay(url, chart.digest, force=True)
+            cache_chart_thumbnail.delay(
+                current_user=current_user,
+                chart_id=chart.id,
+                force=True,
+            )
             return self.response(202, message="OK Async")
         # If digests
         if chart.digest != digest:
@@ -846,6 +882,30 @@ class ChartRestApi(BaseSupersetModelRestApi):
                     overwrite:
                       description: overwrite existing charts?
                       type: boolean
+                    ssh_tunnel_passwords:
+                      description: >-
+                        JSON map of passwords for each ssh_tunnel associated to a
+                        featured database in the ZIP file. If the ZIP includes a
+                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
+                        the password should be provided in the following format:
+                        `{"databases/MyDatabase.yaml": "my_password"}`.
+                      type: string
+                    ssh_tunnel_private_keys:
+                      description: >-
+                        JSON map of private_keys for each ssh_tunnel associated to a
+                        featured database in the ZIP file. If the ZIP includes a
+                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
+                        the private_key should be provided in the following format:
+                        `{"databases/MyDatabase.yaml": "my_private_key"}`.
+                      type: string
+                    ssh_tunnel_private_key_passwords:
+                      description: >-
+                        JSON map of private_key_passwords for each ssh_tunnel associated
+                        to a featured database in the ZIP file. If the ZIP includes a
+                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
+                        the private_key should be provided in the following format:
+                        `{"databases/MyDatabase.yaml": "my_private_key_password"}`.
+                      type: string
           responses:
             200:
               description: Chart import result
@@ -868,6 +928,8 @@ class ChartRestApi(BaseSupersetModelRestApi):
         upload = request.files.get("formData")
         if not upload:
             return self.response_400()
+        if not is_zipfile(upload):
+            raise IncorrectFormatError("Not a ZIP file")
         with ZipFile(upload) as bundle:
             contents = get_contents_from_bundle(bundle)
 
@@ -880,9 +942,29 @@ class ChartRestApi(BaseSupersetModelRestApi):
             else None
         )
         overwrite = request.form.get("overwrite") == "true"
+        ssh_tunnel_passwords = (
+            json.loads(request.form["ssh_tunnel_passwords"])
+            if "ssh_tunnel_passwords" in request.form
+            else None
+        )
+        ssh_tunnel_private_keys = (
+            json.loads(request.form["ssh_tunnel_private_keys"])
+            if "ssh_tunnel_private_keys" in request.form
+            else None
+        )
+        ssh_tunnel_priv_key_passwords = (
+            json.loads(request.form["ssh_tunnel_private_key_passwords"])
+            if "ssh_tunnel_private_key_passwords" in request.form
+            else None
+        )
 
         command = ImportChartsCommand(
-            contents, passwords=passwords, overwrite=overwrite
+            contents,
+            passwords=passwords,
+            overwrite=overwrite,
+            ssh_tunnel_passwords=ssh_tunnel_passwords,
+            ssh_tunnel_private_keys=ssh_tunnel_private_keys,
+            ssh_tunnel_priv_key_passwords=ssh_tunnel_priv_key_passwords,
         )
         command.run()
         return self.response(200, message="OK")

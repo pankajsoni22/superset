@@ -54,7 +54,7 @@ class SupersetException(Exception):
         if self.error_type:
             rv["error_type"] = self.error_type
         if self.exception is not None and hasattr(self.exception, "to_dict"):
-            rv = {**rv, **self.exception.to_dict()}  # type: ignore
+            rv = {**rv, **self.exception.to_dict()}
         return rv
 
 
@@ -113,6 +113,14 @@ class SupersetErrorsException(SupersetException):
         self.errors = errors
         if status is not None:
             self.status = status
+
+
+class SupersetSyntaxErrorException(SupersetErrorsException):
+    status = 422
+    error_type = SupersetErrorType.SYNTAX_ERROR
+
+    def __init__(self, errors: List[SupersetError]) -> None:
+        super().__init__(errors)
 
 
 class SupersetTimeoutException(SupersetErrorFromParamsException):
@@ -258,3 +266,11 @@ class InvalidPayloadSchemaError(SupersetErrorException):
 
 class SupersetCancelQueryException(SupersetException):
     status = 422
+
+
+class QueryNotFoundException(SupersetException):
+    status = 404
+
+
+class ColumnNotFoundException(SupersetException):
+    status = 404

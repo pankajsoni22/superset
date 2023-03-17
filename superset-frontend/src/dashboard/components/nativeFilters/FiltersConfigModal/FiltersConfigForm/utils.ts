@@ -20,8 +20,14 @@ import { flatMapDeep } from 'lodash';
 import { FormInstance } from 'src/components';
 import React from 'react';
 import { CustomControlItem, Dataset } from '@superset-ui/chart-controls';
-import { Column, ensureIsArray, GenericDataType } from '@superset-ui/core';
+import {
+  Column,
+  ensureIsArray,
+  GenericDataType,
+  SupersetClient,
+} from '@superset-ui/core';
 import { DatasourcesState, ChartsState } from 'src/dashboard/types';
+import { cacheWrapper } from 'src/utils/cacheWrapper';
 
 const FILTERS_FIELD_NAME = 'filters';
 
@@ -38,9 +44,13 @@ export const FILTER_SUPPORTED_TYPES = {
   filter_range: [GenericDataType.NUMERIC],
 };
 
-export const useForceUpdate = () => {
+export const useForceUpdate = (isActive = true) => {
   const [, updateState] = React.useState({});
-  return React.useCallback(() => updateState({}), []);
+  return React.useCallback(() => {
+    if (isActive) {
+      updateState({});
+    }
+  }, [isActive]);
 };
 
 export const setNativeFilterFieldValues = (
@@ -126,3 +136,11 @@ export const mostUsedDataset = (
 
   return datasets[mostUsedDataset]?.id;
 };
+
+const localCache = new Map<string, any>();
+
+export const cachedSupersetGet = cacheWrapper(
+  SupersetClient.get,
+  localCache,
+  ({ endpoint }) => endpoint || '',
+);

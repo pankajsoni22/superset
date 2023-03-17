@@ -16,7 +16,12 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  DTTM_ALIAS,
+  BinaryQueryObjectFilterClause,
+  AxisType,
+} from '@superset-ui/core';
 import { ViewRootGroup } from 'echarts/types/src/util/types';
 import GlobalModel from 'echarts/types/src/model/Global';
 import ComponentModel from 'echarts/types/src/model/Component';
@@ -40,12 +45,25 @@ export default function EchartsTimeseries({
   setDataMask,
   setControlValue,
   legendData = [],
+  onContextMenu,
+  xValueFormatter,
+  xAxis,
+  refs,
+  emitCrossFilters,
 }: TimeseriesChartTransformedProps) {
-  const { emitFilter, stack } = formData;
+  const { stack } = formData;
   const echartRef = useRef<EchartsHandler | null>(null);
+  // eslint-disable-next-line no-param-reassign
+  refs.echartRef = echartRef;
   const lastTimeRef = useRef(Date.now());
   const lastSelectedLegend = useRef('');
   const clickTimer = useRef<ReturnType<typeof setTimeout>>();
+  const extraControlRef = useRef<HTMLDivElement>(null);
+  const [extraControlHeight, setExtraControlHeight] = useState(0);
+  useEffect(() => {
+    const updatedHeight = extraControlRef.current?.offsetHeight || 0;
+    setExtraControlHeight(updatedHeight);
+  }, [formData.showExtraControls]);
 
   const handleDoubleClickChange = useCallback(
     (name?: string) => {
@@ -90,40 +108,56 @@ export default function EchartsTimeseries({
     return model;
   };
 
-  const handleChange = useCallback(
-    (values: string[]) => {
-      if (!emitFilter) {
-        return;
+  const getCrossFilterDataMask = useCallback(
+    (value: string) => {
+      const selected: string[] = Object.values(selectedValues);
+      let values: string[];
+      if (selected.includes(value)) {
+        values = selected.filter(v => v !== value);
+      } else {
+        values = [value];
       }
       const groupbyValues = values.map(value => labelMap[value]);
-
-      setDataMask({
-        extraFormData: {
-          filters:
-            values.length === 0
-              ? []
-              : groupby.map((col, idx) => {
-                  const val = groupbyValues.map(v => v[idx]);
-                  if (val === null || val === undefined)
+      return {
+        dataMask: {
+          extraFormData: {
+            filters:
+              values.length === 0
+                ? []
+                : groupby.map((col, idx) => {
+                    const val = groupbyValues.map(v => v[idx]);
+                    if (val === null || val === undefined)
+                      return {
+                        col,
+                        op: 'IS NULL' as const,
+                      };
                     return {
                       col,
-                      op: 'IS NULL',
+                      op: 'IN' as const,
+                      val: val as (string | number | boolean)[],
                     };
-                  return {
-                    col,
-                    op: 'IN',
-                    val: val as (string | number | boolean)[],
-                  };
-                }),
+                  }),
+          },
+          filterState: {
+            label: groupbyValues.length ? groupbyValues : undefined,
+            value: groupbyValues.length ? groupbyValues : null,
+            selectedValues: values.length ? values : null,
+          },
         },
-        filterState: {
-          label: groupbyValues.length ? groupbyValues : undefined,
-          value: groupbyValues.length ? groupbyValues : null,
-          selectedValues: values.length ? values : null,
-        },
-      });
+        isCurrentValueSelected: selected.includes(value),
+      };
     },
-    [groupby, labelMap, setDataMask, emitFilter],
+    [groupby, labelMap, selectedValues],
+  );
+
+  const handleChange = useCallback(
+    (value: string) => {
+      if (!emitCrossFilters) {
+        return;
+      }
+      setDataMask(getCrossFilterDataMask(value).dataMask);
+    },
+    [emitCrossFilters, setDataMask, getCrossFilterDataMask],
   );
 
   const eventHandlers: EventHandlers = {
@@ -134,12 +168,7 @@ export default function EchartsTimeseries({
       // Ensure that double-click events do not trigger single click event. So we put it in the timer.
       clickTimer.current = setTimeout(() => {
         const { seriesName: name } = props;
-        const values = Object.values(selectedValues);
-        if (values.includes(name)) {
-          handleChange(values.filter(v => v !== name));
-        } else {
-          handleChange([name]);
-        }
+        handleChange(name);
       }, TIMER_DURATION);
     },
     mouseout: () => {
@@ -165,6 +194,48 @@ export default function EchartsTimeseries({
       // if all legend is unselected, we keep all selected
       if (Object.values(payload.selected).every(i => !i)) {
         handleDoubleClickChange();
+      }
+    },
+    contextmenu: eventParams => {
+      if (onContextMenu) {
+        eventParams.event.stop();
+        const { data, seriesName } = eventParams;
+        const drillToDetailFilters: BinaryQueryObjectFilterClause[] = [];
+        const pointerEvent = eventParams.event.event;
+        const values = [
+          ...(eventParams.name ? [eventParams.name] : []),
+          ...labelMap[eventParams.seriesName],
+        ];
+        if (data) {
+          if (xAxis.type === AxisType.time) {
+            drillToDetailFilters.push({
+              col:
+                // if the xAxis is '__timestamp', granularity_sqla will be the column of filter
+                xAxis.label === DTTM_ALIAS
+                  ? formData.granularitySqla
+                  : xAxis.label,
+              grain: formData.timeGrainSqla,
+              op: '==',
+              val: data[0],
+              formattedVal: xValueFormatter(data[0]),
+            });
+          }
+          [
+            ...(xAxis.type === AxisType.category ? [xAxis.label] : []),
+            ...formData.groupby,
+          ].forEach((dimension, i) =>
+            drillToDetailFilters.push({
+              col: dimension,
+              op: '==',
+              val: values[i],
+              formattedVal: String(values[i]),
+            }),
+          );
+        }
+        onContextMenu(pointerEvent.clientX, pointerEvent.clientY, {
+          drillToDetail: drillToDetailFilters,
+          crossFilter: getCrossFilterDataMask(seriesName),
+        });
       }
     },
   };
@@ -199,10 +270,12 @@ export default function EchartsTimeseries({
 
   return (
     <>
-      <ExtraControls formData={formData} setControlValue={setControlValue} />
+      <div ref={extraControlRef}>
+        <ExtraControls formData={formData} setControlValue={setControlValue} />
+      </div>
       <Echart
-        ref={echartRef}
-        height={height}
+        refs={refs}
+        height={height - extraControlHeight}
         width={width}
         echartOptions={echartOptions}
         eventHandlers={eventHandlers}

@@ -16,29 +16,34 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Input } from 'src/components/Input';
 import { FormItem } from 'src/components/Form';
 import jsonStringify from 'json-stringify-pretty-compact';
 import Button from 'src/components/Button';
-import { AsyncSelect, Row, Col, AntdForm } from 'src/components';
+import { AntdForm, AsyncSelect, Col, Row } from 'src/components';
 import rison from 'rison';
 import {
-  styled,
-  t,
-  SupersetClient,
-  getCategoricalSchemeRegistry,
+  CategoricalColorNamespace,
   ensureIsArray,
+  getCategoricalSchemeRegistry,
   getSharedLabelColor,
+  styled,
+  SupersetClient,
+  t,
 } from '@superset-ui/core';
 
 import Modal from 'src/components/Modal';
 import { JsonEditor } from 'src/components/AsyncAceEditor';
 
 import ColorSchemeControlWrapper from 'src/dashboard/components/ColorSchemeControlWrapper';
+import FilterScopeModal from 'src/dashboard/components/filterscope/FilterScopeModal';
 import { getClientErrorObject } from 'src/utils/getClientErrorObject';
 import withToasts from 'src/components/MessageToasts/withToasts';
 import { FeatureFlag, isFeatureEnabled } from 'src/featureFlags';
+import TagType from 'src/types/TagType';
+import { addTag, deleteTaggedObjects, fetchTags, OBJECT_TYPES } from 'src/tags';
+import { loadTags } from 'src/components/Tags/utils';
 
 const StyledFormItem = styled(FormItem)`
   margin-bottom: 0;
@@ -56,7 +61,6 @@ type PropertiesModalProps = {
   show?: boolean;
   onHide?: () => void;
   colorScheme?: string;
-  setColorSchemeAndUnsavedChanges?: () => void;
   onSubmit?: (params: Record<string, any>) => void;
   addSuccessToast: (message: string) => void;
   addDangerToast: (message: string) => void;
@@ -100,7 +104,17 @@ const PropertiesModal = ({
   const [owners, setOwners] = useState<Owners>([]);
   const [roles, setRoles] = useState<Roles>([]);
   const saveLabel = onlyApply ? t('Apply') : t('Save');
+  const [tags, setTags] = useState<TagType[]>([]);
   const categoricalSchemeRegistry = getCategoricalSchemeRegistry();
+
+  const tagsAsSelectValues = useMemo(() => {
+    const selectTags = tags.map(tag => ({
+      value: tag.name,
+      label: tag.name,
+      key: tag.name,
+    }));
+    return selectTags;
+  }, [tags.length]);
 
   const handleErrorResponse = async (response: Response) => {
     const { error, statusText, message } = await getClientErrorObject(response);
@@ -116,7 +130,7 @@ const PropertiesModal = ({
     }
 
     Modal.error({
-      title: 'Error',
+      title: t('Error'),
       content: errorText,
       okButtonProps: { danger: true, className: 'btn-danger' },
     });
@@ -132,12 +146,14 @@ const PropertiesModal = ({
       return SupersetClient.get({
         endpoint: `/api/v1/dashboard/related/${accessType}?q=${query}`,
       }).then(response => ({
-        data: response.json.result.map(
-          (item: { value: number; text: string }) => ({
+        data: response.json.result
+          .filter((item: { extra: { active: boolean } }) =>
+            item.extra.active !== undefined ? item.extra.active : true,
+          )
+          .map((item: { value: number; text: string }) => ({
             value: item.value,
             label: item.text,
-          }),
-        ),
+          })),
         totalCount: response.json.count,
       }));
     },
@@ -178,9 +194,7 @@ const PropertiesModal = ({
       }
       const metaDataCopy = { ...metadata };
 
-      if (metaDataCopy?.shared_label_colors) {
-        delete metaDataCopy.shared_label_colors;
-      }
+      delete metaDataCopy.shared_label_colors;
 
       delete metaDataCopy.color_scheme_domain;
 
@@ -265,7 +279,7 @@ const PropertiesModal = ({
   };
 
   const onColorSchemeChange = (
-    colorScheme?: string,
+    colorScheme = '',
     { updateMetadata = true } = {},
   ) => {
     // check that color_scheme is valid
@@ -275,7 +289,7 @@ const PropertiesModal = ({
     // only fire if the color_scheme is present and invalid
     if (colorScheme && !colorChoices.includes(colorScheme)) {
       Modal.error({
-        title: 'Error',
+        title: t('Error'),
         content: t('A valid color scheme is required'),
         okButtonProps: { danger: true, className: 'btn-danger' },
       });
@@ -292,6 +306,41 @@ const PropertiesModal = ({
     setColorScheme(colorScheme);
   };
 
+  const updateTags = (oldTags: TagType[], newTags: TagType[]) => {
+    // update the tags for this object
+    // add tags that are in new tags, but not in old tags
+    // eslint-disable-next-line array-callback-return
+    newTags.map((tag: TagType) => {
+      if (!oldTags.some(t => t.name === tag.name)) {
+        addTag(
+          {
+            objectType: OBJECT_TYPES.DASHBOARD,
+            objectId: dashboardId,
+            includeTypes: false,
+          },
+          tag.name,
+          () => {},
+          () => {},
+        );
+      }
+    });
+    // delete tags that are in old tags, but not in new tags
+    // eslint-disable-next-line array-callback-return
+    oldTags.map((tag: TagType) => {
+      if (!newTags.some(t => t.name === tag.name)) {
+        deleteTaggedObjects(
+          {
+            objectType: OBJECT_TYPES.DASHBOARD,
+            objectId: dashboardId,
+          },
+          tag,
+          () => {},
+          () => {},
+        );
+      }
+    });
+  };
+
   const onFinish = () => {
     const { title, slug, certifiedBy, certificationDetails } =
       form.getFieldsValue();
@@ -299,46 +348,74 @@ const PropertiesModal = ({
     let colorNamespace = '';
     let currentJsonMetadata = jsonMetadata;
 
-    // color scheme in json metadata has precedence over selection
-    if (currentJsonMetadata?.length) {
-      let metadata;
-      try {
-        metadata = JSON.parse(currentJsonMetadata);
-      } catch (error) {
-        addDangerToast(t('JSON metadata is invalid!'));
+    // validate currentJsonMetadata
+    let metadata;
+    try {
+      if (
+        !currentJsonMetadata.startsWith('{') ||
+        !currentJsonMetadata.endsWith('}')
+      ) {
+        throw new Error();
       }
-      currentColorScheme = metadata?.color_scheme || colorScheme;
-      colorNamespace = metadata?.color_namespace || '';
-
-      // filter shared_label_color from user input
-      if (metadata?.shared_label_colors) {
-        delete metadata.shared_label_colors;
-      }
-      if (metadata?.color_scheme_domain) {
-        delete metadata.color_scheme_domain;
-      }
-
-      const colorMap = getSharedLabelColor().getColorMap(
-        colorNamespace,
-        currentColorScheme,
-        true,
-      );
-
-      metadata.shared_label_colors = colorMap;
-
-      if (metadata?.color_scheme) {
-        metadata.color_scheme_domain =
-          categoricalSchemeRegistry.get(colorScheme)?.colors || [];
-      } else {
-        metadata.color_scheme_domain = [];
-      }
-
-      currentJsonMetadata = jsonStringify(metadata);
+      metadata = JSON.parse(currentJsonMetadata);
+    } catch (error) {
+      addDangerToast(t('JSON metadata is invalid!'));
+      return;
     }
+
+    // color scheme in json metadata has precedence over selection
+    currentColorScheme = metadata?.color_scheme || colorScheme;
+    colorNamespace = metadata?.color_namespace;
+
+    // filter shared_label_color from user input
+    if (metadata?.shared_label_colors) {
+      delete metadata.shared_label_colors;
+    }
+    if (metadata?.color_scheme_domain) {
+      delete metadata.color_scheme_domain;
+    }
+
+    const sharedLabelColor = getSharedLabelColor();
+    const categoricalNamespace =
+      CategoricalColorNamespace.getNamespace(colorNamespace);
+    categoricalNamespace.resetColors();
+    if (currentColorScheme) {
+      sharedLabelColor.updateColorMap(colorNamespace, currentColorScheme);
+      metadata.shared_label_colors = Object.fromEntries(
+        sharedLabelColor.getColorMap(),
+      );
+      metadata.color_scheme_domain =
+        categoricalSchemeRegistry.get(colorScheme)?.colors || [];
+    } else {
+      sharedLabelColor.reset();
+      metadata.shared_label_colors = {};
+      metadata.color_scheme_domain = [];
+    }
+
+    currentJsonMetadata = jsonStringify(metadata);
 
     onColorSchemeChange(currentColorScheme, {
       updateMetadata: false,
     });
+
+    if (isFeatureEnabled(FeatureFlag.TAGGING_SYSTEM)) {
+      // update tags
+      try {
+        fetchTags(
+          {
+            objectType: OBJECT_TYPES.DASHBOARD,
+            objectId: dashboardId,
+            includeTypes: false,
+          },
+          (currentTags: TagType[]) => updateTags(currentTags, tags),
+          error => {
+            handleErrorResponse(error);
+          },
+        );
+      } catch (error) {
+        handleErrorResponse(error);
+      }
+    }
 
     const moreOnSubmitProps: { roles?: Roles } = {};
     const morePutProps: { roles?: number[] } = {};
@@ -359,9 +436,9 @@ const PropertiesModal = ({
       ...moreOnSubmitProps,
     };
     if (onlyApply) {
-      addSuccessToast(t('Dashboard properties updated'));
       onSubmit(onSubmitProps);
       onHide();
+      addSuccessToast(t('Dashboard properties updated'));
     } else {
       SupersetClient.put({
         endpoint: `/api/v1/dashboard/${dashboardId}`,
@@ -377,9 +454,9 @@ const PropertiesModal = ({
           ...morePutProps,
         }),
       }).then(() => {
-        addSuccessToast(t('The dashboard has been saved'));
         onSubmit(onSubmitProps);
         onHide();
+        addSuccessToast(t('The dashboard has been saved'));
       }, handleErrorResponse);
     }
   };
@@ -444,6 +521,7 @@ const PropertiesModal = ({
             <StyledFormItem label={t('Owners')}>
               <AsyncSelect
                 allowClear
+                allowNewOptions
                 ariaLabel={t('Owners')}
                 disabled={isLoading}
                 mode="multiple"
@@ -521,6 +599,33 @@ const PropertiesModal = ({
     }
   }, [dashboardInfo, dashboardTitle, form]);
 
+  useEffect(() => {
+    if (!isFeatureEnabled(FeatureFlag.TAGGING_SYSTEM)) return;
+    try {
+      fetchTags(
+        {
+          objectType: OBJECT_TYPES.DASHBOARD,
+          objectId: dashboardId,
+          includeTypes: false,
+        },
+        (tags: TagType[]) => setTags(tags),
+        (error: Response) => {
+          addDangerToast(`Error fetching tags: ${error.text}`);
+        },
+      );
+    } catch (error) {
+      handleErrorResponse(error);
+    }
+  }, [dashboardId]);
+
+  const handleChangeTags = (values: { label: string; value: number }[]) => {
+    // triggered whenever a new tag is selected or a tag was deselected
+    // on new tag selected, add the tag
+
+    const uniqueTags = [...new Set(values.map(v => v.label))];
+    setTags([...uniqueTags.map(t => ({ name: t }))]);
+  };
+
   return (
     <Modal
       show={show}
@@ -538,6 +643,7 @@ const PropertiesModal = ({
             {t('Cancel')}
           </Button>
           <Button
+            data-test="properties-modal-apply-button"
             onClick={form.submit}
             buttonSize="small"
             buttonStyle="primary"
@@ -618,6 +724,33 @@ const PropertiesModal = ({
             </p>
           </Col>
         </Row>
+        {isFeatureEnabled(FeatureFlag.TAGGING_SYSTEM) ? (
+          <Row gutter={16}>
+            <Col xs={24} md={12}>
+              <h3 css={{ marginTop: '1em' }}>{t('Tags')}</h3>
+            </Col>
+          </Row>
+        ) : null}
+        {isFeatureEnabled(FeatureFlag.TAGGING_SYSTEM) ? (
+          <Row gutter={16}>
+            <Col xs={24} md={12}>
+              <StyledFormItem>
+                <AsyncSelect
+                  ariaLabel="Tags"
+                  mode="multiple"
+                  allowNewOptions
+                  value={tagsAsSelectValues}
+                  options={loadTags}
+                  onChange={handleChangeTags}
+                  allowClear
+                />
+              </StyledFormItem>
+              <p className="help-block">
+                {t('A list of tags that have been applied to this chart.')}
+              </p>
+            </Col>
+          </Row>
+        ) : null}
         <Row>
           <Col xs={24} md={24}>
             <h3 style={{ marginTop: '1em' }}>
@@ -649,6 +782,23 @@ const PropertiesModal = ({
                 <p className="help-block">
                   {t(
                     'This JSON object is generated dynamically when clicking the save or overwrite button in the dashboard view. It is exposed here for reference and for power users who may want to alter specific parameters.',
+                  )}
+                  {onlyApply && (
+                    <>
+                      {' '}
+                      {t(
+                        'Please DO NOT overwrite the "filter_scopes" key.',
+                      )}{' '}
+                      <FilterScopeModal
+                        triggerNode={
+                          <span className="alert-link">
+                            {t('Use "%(menuName)s" menu instead.', {
+                              menuName: t('Set filter mapping'),
+                            })}
+                          </span>
+                        }
+                      />
+                    </>
                   )}
                 </p>
               </>

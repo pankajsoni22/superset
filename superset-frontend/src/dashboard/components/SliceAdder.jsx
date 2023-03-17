@@ -19,15 +19,10 @@
 /* eslint-env browser */
 import React from 'react';
 import PropTypes from 'prop-types';
-import { List } from 'react-virtualized';
+import AutoSizer from 'react-virtualized-auto-sizer';
+import { FixedSizeList as List } from 'react-window';
 import { createFilter } from 'react-search-input';
-import {
-  t,
-  styled,
-  isFeatureEnabled,
-  FeatureFlag,
-  css,
-} from '@superset-ui/core';
+import { t, styled, css } from '@superset-ui/core';
 import { Input } from 'src/components/Input';
 import { Select } from 'src/components';
 import Loading from 'src/components/Loading';
@@ -42,7 +37,6 @@ import {
   NEW_COMPONENTS_SOURCE_ID,
 } from 'src/dashboard/util/constants';
 import { slicePropShape } from 'src/dashboard/util/propShapes';
-import { FILTER_BOX_MIGRATION_STATES } from 'src/explore/constants';
 import _ from 'lodash';
 import AddSliceCard from './AddSliceCard';
 import AddSliceDragPreview from './dnd/AddSliceDragPreview';
@@ -57,8 +51,6 @@ const propTypes = {
   userId: PropTypes.string.isRequired,
   selectedSliceIds: PropTypes.arrayOf(PropTypes.number),
   editMode: PropTypes.bool,
-  height: PropTypes.number,
-  filterboxMigrationState: FILTER_BOX_MIGRATION_STATES,
   dashboardId: PropTypes.number,
 };
 
@@ -66,24 +58,19 @@ const defaultProps = {
   selectedSliceIds: [],
   editMode: false,
   errorMessage: '',
-  height: window.innerHeight,
-  filterboxMigrationState: FILTER_BOX_MIGRATION_STATES.NOOP,
 };
 
 const KEYS_TO_FILTERS = ['slice_name', 'viz_type', 'datasource_name'];
 const KEYS_TO_SORT = {
-  slice_name: 'name',
-  viz_type: 'viz type',
-  datasource_name: 'dataset',
-  changed_on: 'recent',
+  slice_name: t('name'),
+  viz_type: t('viz type'),
+  datasource_name: t('dataset'),
+  changed_on: t('recent'),
 };
 
 const DEFAULT_SORT_KEY = 'changed_on';
 
-const MARGIN_BOTTOM = 16;
-const SIDEPANE_HEADER_HEIGHT = 30;
-const SLICE_ADDER_CONTROL_HEIGHT = 64;
-const DEFAULT_CELL_HEIGHT = 112;
+const DEFAULT_CELL_HEIGHT = 128;
 
 const Controls = styled.div`
   display: flex;
@@ -119,6 +106,11 @@ const NewChartButton = styled(Button)`
   `}
 `;
 
+export const ChartList = styled.div`
+  flex-grow: 1;
+  min-height: 0;
+`;
+
 class SliceAdder extends React.Component {
   static sortByComparator(attr) {
     const desc = attr === 'changed_on' ? -1 : 1;
@@ -149,12 +141,7 @@ class SliceAdder extends React.Component {
   }
 
   componentDidMount() {
-    const { userId, filterboxMigrationState } = this.props;
-    this.slicesRequest = this.props.fetchAllSlices(
-      userId,
-      isFeatureEnabled(FeatureFlag.ENABLE_FILTER_BOX_MIGRATION) &&
-        filterboxMigrationState !== FILTER_BOX_MIGRATION_STATES.SNOOZED,
-    );
+    this.slicesRequest = this.props.fetchAllSlices(this.props.userId);
   }
 
   UNSAFE_componentWillReceiveProps(nextProps) {
@@ -197,13 +184,8 @@ class SliceAdder extends React.Component {
   handleChange = _.debounce(value => {
     this.searchUpdated(value);
 
-    const { userId, filterboxMigrationState } = this.props;
-    this.slicesRequest = this.props.fetchFilteredSlices(
-      userId,
-      isFeatureEnabled(FeatureFlag.ENABLE_FILTER_BOX_MIGRATION) &&
-        filterboxMigrationState !== FILTER_BOX_MIGRATION_STATES.SNOOZED,
-      value,
-    );
+    const { userId } = this.props;
+    this.slicesRequest = this.props.fetchFilteredSlices(userId, value);
   }, 300);
 
   searchUpdated(searchTerm) {
@@ -225,13 +207,8 @@ class SliceAdder extends React.Component {
       ),
     }));
 
-    const { userId, filterboxMigrationState } = this.props;
-    this.slicesRequest = this.props.fetchSortedSlices(
-      userId,
-      isFeatureEnabled(FeatureFlag.ENABLE_FILTER_BOX_MIGRATION) &&
-        filterboxMigrationState !== FILTER_BOX_MIGRATION_STATES.SNOOZED,
-      sortBy,
-    );
+    const { userId } = this.props;
+    this.slicesRequest = this.props.fetchSortedSlices(userId, sortBy);
   }
 
   rowRenderer({ key, index, style }) {
@@ -273,6 +250,7 @@ class SliceAdder extends React.Component {
             visType={cellData.viz_type}
             datasourceUrl={cellData.datasource_url}
             datasourceName={cellData.datasource_name}
+            thumbnailUrl={cellData.thumbnail_url}
             isSelected={isSelected}
           />
         )}
@@ -281,13 +259,14 @@ class SliceAdder extends React.Component {
   }
 
   render() {
-    const slicesListHeight =
-      this.props.height -
-      SIDEPANE_HEADER_HEIGHT -
-      SLICE_ADDER_CONTROL_HEIGHT -
-      MARGIN_BOTTOM;
     return (
-      <div className="slice-adder-container">
+      <div
+        css={css`
+          height: 100%;
+          display: flex;
+          flex-direction: column;
+        `}
+      >
         <NewChartButtonContainer>
           <NewChartButton
             buttonStyle="link"
@@ -325,19 +304,32 @@ class SliceAdder extends React.Component {
         </Controls>
         {this.props.isLoading && <Loading />}
         {!this.props.isLoading && this.state.filteredSlices.length > 0 && (
-          <List
-            width={376}
-            height={slicesListHeight}
-            rowCount={this.state.filteredSlices.length}
-            rowHeight={DEFAULT_CELL_HEIGHT}
-            rowRenderer={this.rowRenderer}
-            searchTerm={this.state.searchTerm}
-            sortBy={this.state.sortBy}
-            selectedSliceIds={this.props.selectedSliceIds}
-          />
+          <ChartList>
+            <AutoSizer>
+              {({ height, width }) => (
+                <List
+                  width={width}
+                  height={height}
+                  itemCount={this.state.filteredSlices.length}
+                  itemSize={DEFAULT_CELL_HEIGHT}
+                  searchTerm={this.state.searchTerm}
+                  sortBy={this.state.sortBy}
+                  selectedSliceIds={this.props.selectedSliceIds}
+                >
+                  {this.rowRenderer}
+                </List>
+              )}
+            </AutoSizer>
+          </ChartList>
         )}
         {this.props.errorMessage && (
-          <div className="error-message">{this.props.errorMessage}</div>
+          <div
+            css={css`
+              padding: 16px;
+            `}
+          >
+            {this.props.errorMessage}
+          </div>
         )}
         {/* Drag preview is just a single fixed-position element */}
         <AddSliceDragPreview slices={this.state.filteredSlices} />

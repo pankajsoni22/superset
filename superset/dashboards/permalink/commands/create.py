@@ -31,8 +31,10 @@ logger = logging.getLogger(__name__)
 
 class CreateDashboardPermalinkCommand(BaseDashboardPermalinkCommand):
     """
-    Get or create a permalink key for the given dashboard in certain state.
-    Will reuse the key for the same user and dashboard state.
+    Get or create a permalink key for the dashboard.
+
+    The same dashboard_id and state for the same user will return the
+    same permalink.
     """
 
     def __init__(
@@ -46,9 +48,9 @@ class CreateDashboardPermalinkCommand(BaseDashboardPermalinkCommand):
     def run(self) -> str:
         self.validate()
         try:
-            DashboardDAO.get_by_id_or_slug(self.dashboard_id)
+            dashboard = DashboardDAO.get_by_id_or_slug(self.dashboard_id)
             value = {
-                "dashboardId": self.dashboard_id,
+                "dashboardId": str(dashboard.uuid),
                 "state": self.state,
             }
             user_id = get_user_id()
